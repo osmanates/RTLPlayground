@@ -24,8 +24,8 @@ void dhcp_callback(void) __banked;
 // Integrated DHCP server API
 void dhcpd_start(void) __banked;
 void dhcpd_stop(void) __banked;
-void dhcpd_set_pool(uint8_t first_octet, uint8_t count) __banked;
-void dhcpd_set_lease_time(uint32_t seconds) __banked;
+void dhcpd_set_pool(uint8_t first_octet, uint8_t count);
+void dhcpd_set_lease_time(uint32_t seconds);
 uint8_t dhcpd_active_leases(void) __banked;
 void dhcpd_tick(void) __banked;
 

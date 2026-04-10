@@ -171,14 +171,18 @@ function fetchServices() {
   fetch('/services.json')
     .then(r => r.json())
     .then(s => {
+      // Hex-encoded 16-bit fields come in as "0x...." strings
+      const asInt = v => (typeof v === 'string' ? parseInt(v, 16) : v) | 0;
       document.getElementById('svc_stp').checked = !!s.stp;
       document.getElementById('svc_lbd').checked = !!s.lbd;
-      if (s.lbd_timer) document.getElementById('svc_lbd_timer').value = s.lbd_timer;
-      document.getElementById('svc_mgmt_vlan').value = s.mgmt_vlan || 0;
+      const lbdTimer = asInt(s.lbd_timer);
+      if (lbdTimer) document.getElementById('svc_lbd_timer').value = lbdTimer;
+      document.getElementById('svc_mgmt_vlan').value = asInt(s.mgmt_vlan);
       document.getElementById('svc_dhcpd').checked = !!s.dhcpd;
       if (s.dhcpd_pool_start) document.getElementById('svc_dhcpd_pool_start').value = s.dhcpd_pool_start;
       if (s.dhcpd_pool_count) document.getElementById('svc_dhcpd_pool_count').value = s.dhcpd_pool_count;
-      if (s.dhcpd_lease_time) document.getElementById('svc_dhcpd_lease').value = s.dhcpd_lease_time;
+      const lease = asInt(s.dhcpd_lease_time);
+      if (lease) document.getElementById('svc_dhcpd_lease').value = lease;
       document.getElementById('svc_dhcpd_leases').textContent = s.dhcpd_leases || 0;
     })
     .catch(err => console.error('Error fetching services:', err));

@@ -808,6 +808,10 @@ found_end:
  * loop detection, management VLAN, DHCP client and DHCP server.
  * Returns a JSON object that the Services tab in the web UI reads
  * to render checkboxes and status fields.
+ *
+ * Integer fields are emitted in hexadecimal ("0x..") since we already
+ * have byte_to_html() available. The JS side is responsible for
+ * parsing them via parseInt(.., 16).
  */
 void send_services(void)
 {
@@ -817,34 +821,19 @@ void send_services(void)
 	slen += strtox(outbuf + slen, "{\"stp\":");
 	bool_to_html(stpEnabled);
 
-	slen += strtox(outbuf + slen, ",\"lbd\":");
+	// Loop detection: emit the 16-bit timer as hex; 0 means disabled
 	__xdata uint16_t lbd_timer = port_rldp_get();
+	slen += strtox(outbuf + slen, ",\"lbd\":");
 	bool_to_html(lbd_timer != 0);
-	slen += strtox(outbuf + slen, ",\"lbd_timer\":");
-	{
-		__xdata uint16_t v = lbd_timer;
-		__xdata uint8_t d[5];
-		uint8_t n = 0;
-		if (!v) {
-			outbuf[slen++] = '0';
-		} else {
-			while (v) { d[n++] = '0' + (v % 10); v /= 10; }
-			while (n) outbuf[slen++] = d[--n];
-		}
-	}
+	slen += strtox(outbuf + slen, ",\"lbd_timer\":\"0x");
+	byte_to_html(lbd_timer >> 8);
+	byte_to_html(lbd_timer & 0xff);
+	char_to_html('"');
 
-	slen += strtox(outbuf + slen, ",\"mgmt_vlan\":");
-	{
-		__xdata uint16_t v = management_vlan;
-		__xdata uint8_t d[5];
-		uint8_t n = 0;
-		if (!v) {
-			outbuf[slen++] = '0';
-		} else {
-			while (v) { d[n++] = '0' + (v % 10); v /= 10; }
-			while (n) outbuf[slen++] = d[--n];
-		}
-	}
+	slen += strtox(outbuf + slen, ",\"mgmt_vlan\":\"0x");
+	byte_to_html(management_vlan >> 8);
+	byte_to_html(management_vlan & 0xff);
+	char_to_html('"');
 
 	slen += strtox(outbuf + slen, ",\"dhcp_client\":");
 	bool_to_html(dhcp_state.state == DHCP_LEASING);
@@ -857,18 +846,12 @@ void send_services(void)
 	itoa_html(dhcpd_state.pool_count);
 	slen += strtox(outbuf + slen, ",\"dhcpd_leases\":");
 	itoa_html(dhcpd_active_leases());
-	slen += strtox(outbuf + slen, ",\"dhcpd_lease_time\":");
-	{
-		__xdata uint32_t v = dhcpd_state.lease_time;
-		__xdata uint8_t d[10];
-		uint8_t n = 0;
-		if (!v) {
-			outbuf[slen++] = '0';
-		} else {
-			while (v) { d[n++] = '0' + (v % 10); v /= 10; }
-			while (n) outbuf[slen++] = d[--n];
-		}
-	}
+	// Lease time fits in 16 bits for any reasonable value; emit low
+	// 16 bits as hex to avoid pulling in 32-bit decimal conversion.
+	slen += strtox(outbuf + slen, ",\"dhcpd_lease_time\":\"0x");
+	byte_to_html((dhcpd_state.lease_time >> 8) & 0xff);
+	byte_to_html(dhcpd_state.lease_time & 0xff);
+	char_to_html('"');
 	char_to_html('}');
 }
 

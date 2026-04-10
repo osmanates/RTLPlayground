@@ -15,7 +15,6 @@
 __xdata struct dhcp_state dhcp_state;
 __xdata struct dhcpd_state dhcpd_state;
 __xdata uip_ipaddr_t server;
-__xdata uip_ipaddr_t dhcpd_bcast;
 
 #define DHCP_HW_TYPE_ETH	1
 
@@ -393,126 +392,114 @@ static void dhcpc_callback_inner(void)
 
 
 /*
- * Compare two 6 byte hardware addresses. Returns 0 when equal.
+ * Integrated DHCP server. All of the logic lives in a single function
+ * so that we do not create additional cross-function parameter storage
+ * slots in 8051 internal RAM, which is extremely scarce on this
+ * platform.
+ *
+ * The handler is invoked via dhcp_callback() whenever the uIP stack
+ * dispatches a packet to (or periodic event for) the server UDP conn.
+ * It consumes the inbound BOOTP request from uip_appdata in place and
+ * writes the reply back into the same buffer before calling
+ * uip_udp_send().
+ *
+ * Limitations: single subnet, single interface, up to DHCPD_POOL_MAX
+ * leases, no persistent storage, no relay support.
  */
-static uint8_t mac_cmp(__xdata uint8_t *a, __xdata uint8_t *b)
-{
-	for (uint8_t i = 0; i < 6; i++)
-		if (a[i] != b[i])
-			return 1;
-	return 0;
-}
+// Scratch variables for dhcpd_handle. Kept at file scope in __xdata
+// so that they don't occupy any of the tightly-packed internal RAM.
+__xdata uint16_t dhcpd_p;
+__xdata uint8_t dhcpd_i;
+__xdata uint8_t dhcpd_j;
+__xdata uint8_t dhcpd_idx;
+__xdata uint8_t dhcpd_msg_type;
 
-
-/*
- * Look up an existing lease for the given MAC address. Returns the
- * pool index, or 0xff if no lease exists.
- */
-static uint8_t dhcpd_find_lease(__xdata uint8_t *mac)
+static void dhcpd_handle(void)
 {
-	for (uint8_t i = 0; i < dhcpd_state.pool_count; i++) {
-		if (dhcpd_state.leases[i].expires && !mac_cmp(dhcpd_state.leases[i].mac, mac))
-			return i;
+	if (DHCP_P->type != 1) // Must be BOOTREQUEST
+		return;
+	if (DHCP_P->cookie[0] != 0x63 || DHCP_P->cookie[1] != 0x82 ||
+	    DHCP_P->cookie[2] != 0x53 || DHCP_P->cookie[3] != 0x63)
+		return;
+
+	// Scan options for the DHCP message type.
+	dhcpd_msg_type = 0;
+	dhcpd_p = 0;
+	while (DHCP_OPT[dhcpd_p] != DHCP_END && dhcpd_p < 300) {
+		if (!DHCP_OPT[dhcpd_p]) {
+			dhcpd_p++;
+			continue;
+		}
+		if (DHCP_OPT[dhcpd_p] == DHCP_MESSAGE_TYPE &&
+		    DHCP_OPT[dhcpd_p + 1] == DHCP_MESSAGE_TYPE_LEN) {
+			dhcpd_msg_type = DHCP_OPT[dhcpd_p + 2];
+			break;
+		}
+		dhcpd_p += 2 + DHCP_OPT[dhcpd_p + 1];
 	}
-	return 0xff;
-}
 
+	// Release/Decline: free the matching lease and stop.
+	if (dhcpd_msg_type == 7 || dhcpd_msg_type == 4) {
+		for (dhcpd_i = 0; dhcpd_i < dhcpd_state.pool_count; dhcpd_i++) {
+			if (!dhcpd_state.leases[dhcpd_i].expires)
+				continue;
+			for (dhcpd_j = 0; dhcpd_j < 6; dhcpd_j++)
+				if (dhcpd_state.leases[dhcpd_i].mac[dhcpd_j] != DHCP_P->client_addr[dhcpd_j])
+					break;
+			if (dhcpd_j == 6) {
+				dhcpd_state.leases[dhcpd_i].expires = 0;
+				break;
+			}
+		}
+		return;
+	}
 
-/*
- * Allocate a new lease for the given MAC address. Prefers the first
- * entry whose lease has expired. Returns the pool index or 0xff when
- * the pool is full.
- */
-static uint8_t dhcpd_alloc_lease(__xdata uint8_t *mac)
-{
-	for (uint8_t i = 0; i < dhcpd_state.pool_count; i++) {
-		if (!dhcpd_state.leases[i].expires) {
-			memcpy(dhcpd_state.leases[i].mac, mac, 6);
-			dhcpd_state.leases[i].expires = dhcpd_state.lease_time;
-			return i;
+	if (dhcpd_msg_type != DHCP_MESSAGE_DISCOVER && dhcpd_msg_type != DHCP_MESSAGE_REQUEST)
+		return;
+
+	// Look up an existing lease for this MAC.
+	dhcpd_idx = 0xff;
+	for (dhcpd_i = 0; dhcpd_i < dhcpd_state.pool_count; dhcpd_i++) {
+		if (!dhcpd_state.leases[dhcpd_i].expires)
+			continue;
+		for (dhcpd_j = 0; dhcpd_j < 6; dhcpd_j++)
+			if (dhcpd_state.leases[dhcpd_i].mac[dhcpd_j] != DHCP_P->client_addr[dhcpd_j])
+				break;
+		if (dhcpd_j == 6) {
+			dhcpd_idx = dhcpd_i;
+			break;
 		}
 	}
-	return 0xff;
-}
-
-
-/*
- * Add an IPv4 option to the reply option buffer.
- */
-static void dhcpd_addopt_ip(uint8_t code, __xdata uint8_t *ip)
-{
-	DHCP_OPT[dhcp_state.opt_ptr++] = code;
-	DHCP_OPT[dhcp_state.opt_ptr++] = 4;
-	DHCP_OPT[dhcp_state.opt_ptr++] = ip[0];
-	DHCP_OPT[dhcp_state.opt_ptr++] = ip[1];
-	DHCP_OPT[dhcp_state.opt_ptr++] = ip[2];
-	DHCP_OPT[dhcp_state.opt_ptr++] = ip[3];
-}
-
-
-/*
- * Add a 32-bit option to the reply option buffer.
- */
-static void dhcpd_addopt_u32(uint8_t code, uint32_t v)
-{
-	DHCP_OPT[dhcp_state.opt_ptr++] = code;
-	DHCP_OPT[dhcp_state.opt_ptr++] = 4;
-	DHCP_OPT[dhcp_state.opt_ptr++] = (v >> 24) & 0xff;
-	DHCP_OPT[dhcp_state.opt_ptr++] = (v >> 16) & 0xff;
-	DHCP_OPT[dhcp_state.opt_ptr++] = (v >> 8) & 0xff;
-	DHCP_OPT[dhcp_state.opt_ptr++] = v & 0xff;
-}
-
-
-/*
- * Scan the options of an incoming DHCP packet and return the DHCP
- * message type (DISCOVER, REQUEST, RELEASE, ...). Returns 0 if no
- * message type option was found.
- */
-static uint8_t dhcpd_parse_msg_type(void)
-{
-	uint16_t p = 0;
-	while (DHCP_OPT[p] != DHCP_END) {
-		uint8_t code = DHCP_OPT[p++];
-		if (!code) // PAD option has no length
-			continue;
-		uint8_t len = DHCP_OPT[p++];
-		if (code == DHCP_MESSAGE_TYPE && len == DHCP_MESSAGE_TYPE_LEN)
-			return DHCP_OPT[p];
-		p += len;
-		if (p > 300) // Safety limit for malformed packets
-			return 0;
+	// Otherwise allocate a new one from the first free slot.
+	if (dhcpd_idx == 0xff) {
+		for (dhcpd_i = 0; dhcpd_i < dhcpd_state.pool_count; dhcpd_i++) {
+			if (!dhcpd_state.leases[dhcpd_i].expires) {
+				dhcpd_idx = dhcpd_i;
+				for (dhcpd_j = 0; dhcpd_j < 6; dhcpd_j++)
+					dhcpd_state.leases[dhcpd_i].mac[dhcpd_j] = DHCP_P->client_addr[dhcpd_j];
+				break;
+			}
+		}
 	}
-	return 0;
-}
+	if (dhcpd_idx == 0xff)
+		return; // pool exhausted
 
+	dhcpd_state.leases[dhcpd_idx].expires = dhcpd_state.lease_time;
 
-/*
- * Build a BOOTP reply (OFFER or ACK) for the client that issued the
- * current request. The chosen IP is taken from pool index idx.
- */
-static void dhcpd_build_reply(uint8_t idx, uint8_t msg_type)
-{
-	// Preserve client MAC and transaction id before clearing the buffer
-	__xdata uint32_t req_tid = DHCP_P->tid;
-	__xdata uint8_t req_mac[6];
-	memcpy(req_mac, DHCP_P->client_addr, 6);
-
+	// Build the reply in place.
 	DHCP_P->type = 2; // BOOTREPLY
 	DHCP_P->hw = DHCP_HW_TYPE_ETH;
 	DHCP_P->hw_len = 6;
 	DHCP_P->hops = 0;
-	DHCP_P->tid = req_tid;
 	DHCP_P->delay = 0;
 	DHCP_P->flags = 0;
-	// Clear all fields from client_ip through the end of the bootp file area
-	memset(DHCP_P->client_ip, 0, 224);
-	// your_ip = offered address (same /24 as our own address)
+	// Clear your_ip, siaddr, giaddr, padding and BOOTP file fields
+	memset(DHCP_P->your_ip, 0, 4 + 4 + 4 + 10 + 64 + 128);
+	memset(DHCP_P->client_ip, 0, 4);
 	DHCP_P->your_ip[0] = uip_hostaddr[0] & 0xff;
 	DHCP_P->your_ip[1] = uip_hostaddr[0] >> 8;
 	DHCP_P->your_ip[2] = uip_hostaddr[1] & 0xff;
-	DHCP_P->your_ip[3] = dhcpd_state.pool_first + idx;
-	memcpy(DHCP_P->client_addr, req_mac, 6);
+	DHCP_P->your_ip[3] = dhcpd_state.pool_first + dhcpd_idx;
 	DHCP_P->cookie[0] = 0x63;
 	DHCP_P->cookie[1] = 0x82;
 	DHCP_P->cookie[2] = 0x53;
@@ -521,97 +508,44 @@ static void dhcpd_build_reply(uint8_t idx, uint8_t msg_type)
 	dhcp_state.opt_ptr = 0;
 	DHCP_OPT[dhcp_state.opt_ptr++] = DHCP_MESSAGE_TYPE;
 	DHCP_OPT[dhcp_state.opt_ptr++] = DHCP_MESSAGE_TYPE_LEN;
-	DHCP_OPT[dhcp_state.opt_ptr++] = msg_type;
+	DHCP_OPT[dhcp_state.opt_ptr++] = (dhcpd_msg_type == DHCP_MESSAGE_DISCOVER)
+	                                  ? DHCP_MESSAGE_OFFER : DHCP_MESSAGE_ACK;
 
-	// Server identifier = our IP address
-	__xdata uint8_t our_ip[4];
-	our_ip[0] = uip_hostaddr[0] & 0xff;
-	our_ip[1] = uip_hostaddr[0] >> 8;
-	our_ip[2] = uip_hostaddr[1] & 0xff;
-	our_ip[3] = uip_hostaddr[1] >> 8;
-	dhcpd_addopt_ip(DHCP_SERVER_ID, our_ip);
+	// Server identifier, subnet mask and router — all derived from
+	// uip_hostaddr / uip_netmask inline, no intermediate buffers.
+	DHCP_OPT[dhcp_state.opt_ptr++] = DHCP_SERVER_ID;
+	DHCP_OPT[dhcp_state.opt_ptr++] = 4;
+	DHCP_OPT[dhcp_state.opt_ptr++] = uip_hostaddr[0] & 0xff;
+	DHCP_OPT[dhcp_state.opt_ptr++] = uip_hostaddr[0] >> 8;
+	DHCP_OPT[dhcp_state.opt_ptr++] = uip_hostaddr[1] & 0xff;
+	DHCP_OPT[dhcp_state.opt_ptr++] = uip_hostaddr[1] >> 8;
 
-	// Subnet mask
-	__xdata uint8_t mask[4];
-	mask[0] = uip_netmask[0] & 0xff;
-	mask[1] = uip_netmask[0] >> 8;
-	mask[2] = uip_netmask[1] & 0xff;
-	mask[3] = uip_netmask[1] >> 8;
-	dhcpd_addopt_ip(DHCP_SUBNET_MASK, mask);
+	DHCP_OPT[dhcp_state.opt_ptr++] = DHCP_SUBNET_MASK;
+	DHCP_OPT[dhcp_state.opt_ptr++] = 4;
+	DHCP_OPT[dhcp_state.opt_ptr++] = uip_netmask[0] & 0xff;
+	DHCP_OPT[dhcp_state.opt_ptr++] = uip_netmask[0] >> 8;
+	DHCP_OPT[dhcp_state.opt_ptr++] = uip_netmask[1] & 0xff;
+	DHCP_OPT[dhcp_state.opt_ptr++] = uip_netmask[1] >> 8;
 
-	// Default router = our IP
-	dhcpd_addopt_ip(DHCP_ROUTER, our_ip);
+	DHCP_OPT[dhcp_state.opt_ptr++] = DHCP_ROUTER;
+	DHCP_OPT[dhcp_state.opt_ptr++] = 4;
+	DHCP_OPT[dhcp_state.opt_ptr++] = uip_hostaddr[0] & 0xff;
+	DHCP_OPT[dhcp_state.opt_ptr++] = uip_hostaddr[0] >> 8;
+	DHCP_OPT[dhcp_state.opt_ptr++] = uip_hostaddr[1] & 0xff;
+	DHCP_OPT[dhcp_state.opt_ptr++] = uip_hostaddr[1] >> 8;
 
-	// Lease time
-	dhcpd_addopt_u32(DHCP_LEASE, dhcpd_state.lease_time);
+	DHCP_OPT[dhcp_state.opt_ptr++] = DHCP_LEASE;
+	DHCP_OPT[dhcp_state.opt_ptr++] = 4;
+	DHCP_OPT[dhcp_state.opt_ptr++] = (dhcpd_state.lease_time >> 24) & 0xff;
+	DHCP_OPT[dhcp_state.opt_ptr++] = (dhcpd_state.lease_time >> 16) & 0xff;
+	DHCP_OPT[dhcp_state.opt_ptr++] = (dhcpd_state.lease_time >> 8) & 0xff;
+	DHCP_OPT[dhcp_state.opt_ptr++] = dhcpd_state.lease_time & 0xff;
 
 	DHCP_OPT[dhcp_state.opt_ptr++] = DHCP_END;
-	// Pad reply to at least 300 bytes
-	while (dhcp_state.opt_ptr < 60) {
+	while (dhcp_state.opt_ptr < 60)
 		DHCP_OPT[dhcp_state.opt_ptr++] = 0;
-	}
 
 	uip_udp_send(sizeof(struct dhcp_pkt) + dhcp_state.opt_ptr);
-}
-
-
-/*
- * DHCP server request handler. Inspects the inbound message type and
- * either allocates a lease (OFFER) or confirms an existing one (ACK).
- * RELEASE and DECLINE messages free the corresponding lease.
- */
-static void dhcpd_handle_request(void)
-{
-	if (DHCP_P->type != 1) // Must be BOOTREQUEST
-		return;
-	if (DHCP_P->cookie[0] != 0x63 || DHCP_P->cookie[1] != 0x82 ||
-	    DHCP_P->cookie[2] != 0x53 || DHCP_P->cookie[3] != 0x63)
-		return;
-
-	__xdata uint8_t mac[6];
-	memcpy(mac, DHCP_P->client_addr, 6);
-
-	uint8_t msg_type = dhcpd_parse_msg_type();
-	print_string("dhcpd RX type "); print_byte(msg_type); write_char('\n');
-
-	switch (msg_type) {
-	case DHCP_MESSAGE_DISCOVER: {
-		uint8_t idx = dhcpd_find_lease(mac);
-		if (idx == 0xff)
-			idx = dhcpd_alloc_lease(mac);
-		if (idx == 0xff) {
-			print_string("dhcpd pool exhausted\n");
-			return;
-		}
-		print_string("dhcpd OFFER .");
-		print_byte(dhcpd_state.pool_first + idx); write_char('\n');
-		dhcpd_build_reply(idx, DHCP_MESSAGE_OFFER);
-		break;
-	}
-	case DHCP_MESSAGE_REQUEST: {
-		uint8_t idx = dhcpd_find_lease(mac);
-		if (idx == 0xff) {
-			// Unknown client: allocate fresh
-			idx = dhcpd_alloc_lease(mac);
-		}
-		if (idx == 0xff)
-			return;
-		dhcpd_state.leases[idx].expires = dhcpd_state.lease_time;
-		print_string("dhcpd ACK .");
-		print_byte(dhcpd_state.pool_first + idx); write_char('\n');
-		dhcpd_build_reply(idx, DHCP_MESSAGE_ACK);
-		break;
-	}
-	case 7: // DHCPRELEASE
-	case 4: { // DHCPDECLINE
-		uint8_t idx = dhcpd_find_lease(mac);
-		if (idx != 0xff)
-			dhcpd_state.leases[idx].expires = 0;
-		break;
-	}
-	default:
-		break;
-	}
 }
 
 
@@ -648,17 +582,18 @@ void dhcpd_start(void) __banked
 	for (uint8_t i = 0; i < DHCPD_POOL_MAX; i++)
 		dhcpd_state.leases[i].expires = 0;
 
-	uip_ipaddr(dhcpd_bcast, 255, 255, 255, 255);
-	dhcpd_state.conn = uip_udp_new(&dhcpd_bcast, HTONS(DHCPC_CLIENT_PORT));
+	// Re-use the DHCP client's broadcast server address variable; it
+	// is only populated by the client when dhcp_start() is called and
+	// is not otherwise relied upon once the client is leasing.
+	uip_ipaddr(server, 255, 255, 255, 255);
+	dhcpd_state.conn = uip_udp_new(&server, HTONS(DHCPC_CLIENT_PORT));
 	if (!dhcpd_state.conn) {
 		print_string("dhcpd failed to create UDP socket\n");
 		return;
 	}
 	uip_udp_bind(dhcpd_state.conn, HTONS(DHCPC_SERVER_PORT));
 	dhcpd_state.enabled = 1;
-	print_string("dhcpd enabled, pool .");
-	print_byte(dhcpd_state.pool_first); print_string(" +");
-	print_byte(dhcpd_state.pool_count); write_char('\n');
+	print_string("dhcpd enabled\n");
 }
 
 
@@ -674,7 +609,12 @@ void dhcpd_stop(void) __banked
 }
 
 
-void dhcpd_set_pool(uint8_t first_octet, uint8_t count) __banked
+/*
+ * Configure the DHCP server pool: the first last-octet of the handed
+ * out IP range and the number of addresses. Non-__banked since only
+ * cmd_parser (same bank) calls this.
+ */
+void dhcpd_set_pool(uint8_t first_octet, uint8_t count)
 {
 	if (count > DHCPD_POOL_MAX)
 		count = DHCPD_POOL_MAX;
@@ -685,7 +625,11 @@ void dhcpd_set_pool(uint8_t first_octet, uint8_t count) __banked
 }
 
 
-void dhcpd_set_lease_time(uint32_t seconds) __banked
+/*
+ * Set the DHCP server lease time in seconds. Non-__banked since only
+ * cmd_parser (same bank) calls this.
+ */
+void dhcpd_set_lease_time(uint32_t seconds)
 {
 	dhcpd_state.lease_time = seconds;
 }
@@ -702,25 +646,18 @@ uint8_t dhcpd_active_leases(void) __banked
 }
 
 
-static void dhcpd_callback_inner(void)
-{
-	if (!dhcpd_state.enabled)
-		return;
-	if (uip_newdata()) {
-		dhcpd_handle_request();
-	} else {
-		// Make sure no stale data is sent out during periodic polls
-		uip_len = 0;
-	}
-}
-
-
 void dhcp_callback(void) __banked
 {
 	// Dispatch between DHCP client and DHCP server based on which
-	// uIP UDP connection invoked the callback.
-	if (dhcpd_state.enabled && uip_udp_conn == dhcpd_state.conn) {
-		dhcpd_callback_inner();
+	// uIP UDP connection invoked the callback. Cast via (void *) to
+	// side-step the pointer storage-class mismatch between the generic
+	// pointer stored in the dhcpd_state struct field and the
+	// __xdata-qualified global uip_udp_conn.
+	if (dhcpd_state.enabled && (void *)uip_udp_conn == (void *)dhcpd_state.conn) {
+		if (uip_newdata())
+			dhcpd_handle();
+		else
+			uip_len = 0;
 		return;
 	}
 	dhcpc_callback_inner();
