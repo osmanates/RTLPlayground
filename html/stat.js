@@ -199,7 +199,5 @@ window.addEventListener("load", function() {
   update( () => {
     update();
     fillStats();
-    const stat = setInterval(fillStats, 1000);
-    const interval = setInterval(update, 2000);
   });
 });

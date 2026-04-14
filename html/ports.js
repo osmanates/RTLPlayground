@@ -141,7 +141,5 @@ window.addEventListener("load", function() {
     createPortTable();
     updatePortTable();
     getMTUs()
-    const interval = setInterval(update, 2000);
-    const updatePortTableInterval = setInterval(updatePortTable, 1000);
   });
 });

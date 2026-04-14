@@ -46,7 +46,5 @@ window.addEventListener("load", function() {
   update( () => {
     createEEE();
     getEEE();
-    const interval = setInterval(update, 2000);
-    const iCount = setInterval(getEEE, 2000);
   });
 });

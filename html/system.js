@@ -189,7 +189,6 @@ function fetchServices() {
 }
 
 window.addEventListener("load", function() {
-  systemInterval = setInterval(fetchIP, 1000);
+  fetchIP();
   fetchServices();
-  setInterval(fetchServices, 5000);
 });

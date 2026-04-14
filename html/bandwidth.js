@@ -133,6 +133,5 @@ window.addEventListener("load", function() {
   update( () => {
     createBW();
     getBW();
-    const interval = setInterval(update, 2000);
   });
 });

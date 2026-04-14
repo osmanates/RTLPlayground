@@ -76,6 +76,5 @@ async function lagSub(l) {
 window.addEventListener("load", function() {
   update( () => {
     lagForm();
-    const interval = setInterval(update, 2000);
   });
 });

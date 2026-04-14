@@ -136,8 +136,6 @@ function getL2() {
 window.addEventListener("load", function() {
   update( () => {
     getL2();
-    const interval = setInterval(update, 2000);
-    l2GetInterval = setInterval(getL2, 1000);
   });;
 });
 
