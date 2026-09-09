@@ -382,6 +382,57 @@ __code const struct machine machine = {
 };
 
 void machine_custom_init(void) { }
+#elif defined MACHINE_XIKESTOR_SKS3200M_8GPY1XF
+/*
+ * XikeStor SKS3200M-8GPY1XF: 8x 2.5GBit RJ45 (labelled 1-8) + 1x 10GBit SFP+
+ * (labelled 9 on the front panel). Front panel has a Reset button on the left
+ * and SYS / 9(10G) / PWR indicator LEDs on the right. Each RJ45 jack carries
+ * two LEDs, silkscreened "10/100/1000M Link/Act" (amber, left) and
+ * "2.5G Link/Act" (green, right).
+ *
+ * Derived from the ZX-SWTGW218AS definition, which has the identical port
+ * count, the same SFP-is-port-9 labelling and the same per-jack LED split.
+ *
+ * NOT YET VERIFIED on real hardware:
+ *  - reset_pin is deliberately GPIO_NA. The board does have a Reset button,
+ *    but its GPIO is unconfirmed; handle_button() polls the pin once a second
+ *    and a wrong pin can spuriously reboot or restore the default config.
+ *    Once the correct GPIO is known (watch "gpio" CLI output while pressing
+ *    the button), set it here.
+ *  - The SFP GPIOs below are the SWTGW218AS values. If SFP insertion is not
+ *    detected, or LOS/DDM readings look wrong, these are the first suspects.
+ */
+__code const struct machine machine = {
+	.machine_name = "XikeStor SKS3200M-8GPY1XF",
+	.isRTL8373 = 1,
+	.min_port = 0,
+	.max_port = 8,
+	.n_sfp = 1,
+	.log_to_phys_port = {1, 2, 3, 4, 5, 6, 7, 8, 9},
+	.phys_to_log_port = {0, 1, 2, 3, 4, 5, 6, 7, 8},
+	.is_sfp = {0, 0, 0, 0, 0, 0, 0, 0, 1},
+	.sfp_port[0].pin_detect = GPIO30_ACL_BIT3_EN,
+	.sfp_port[0].pin_los = GPIO37,
+	.sfp_port[0].pin_tx_disable = GPIO_NA,
+	.sfp_port[0].sds = 1,
+	.sfp_port[0].i2c = { .sda = GPIO39_I2C_SDA4, .scl = GPIO40_I2C_SCL3_MDC1 },
+	.reset_pin = GPIO_NA,
+	.high_leds = { .mux = LED_27 | LED_28_SYS | LED_29, .enable = LED_28_SYS | LED_29 },
+	.port_led_set = { 0, 0, 0, 0, 0, 0, 0, 0, 1},
+	.led_sets = { { LEDS_2G5 | LEDS_LINK | LEDS_ACT, // Green LED (right)
+					0, // unused
+					LEDS_1G | LEDS_100M | LEDS_10M | LEDS_LINK | LEDS_ACT, // Amber LED (left)
+					0
+				  }, // unused
+				  { LEDS_10G | LEDS_5G | LEDS_2G5 | LEDS_1G | LEDS_100M | LEDS_LINK | LEDS_ACT, // SFP LED
+					0, // unused
+					0, // unused
+					0
+				  }, // unused
+				},
+};
+
+void machine_custom_init(void) { }
 #elif defined MACHINE_LIANGUO_ZX_SWTGW215AS // Has PCB branded PCB-SWTG115AS-V2.0 but is labeled and reports as a ZX-SWTGW215AS, seems to be identical to the "real" ZX-SWTGW215AS except for the LEDs
 __code const struct machine machine = {
 	.machine_name = "Lianguo ZX-SWTGW215AS",
